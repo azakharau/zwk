@@ -1,1 +1,6 @@
 /target
+/.zellij-ntr-heartbeat-*
+/.pytest_cache
+__pycache__/
+*.pyc
+.DS_Store
