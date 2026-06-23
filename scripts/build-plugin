@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -eu
+
+cargo build --release --target wasm32-wasip1
+mkdir -p target/zellij
+cp target/wasm32-wasip1/release/zellij-which-key-router.wasm target/zellij/zellij-which-key-router.wasm
+printf '%s\n' "Built target/zellij/zellij-which-key-router.wasm"
