@@ -1,11 +1,11 @@
 // Repo-local integration example for ~/.config/zellij/config.kdl.
 // Build first: ./scripts/build-plugin
-// Local plugin URL: file:/Users/aliakseizakharau/proj/zwk/target/zellij/zellij-which-key-router.wasm
+// Replace /absolute/path/to/zwk with this repository's absolute path.
 
 keybinds clear-defaults=true {
     locked {
         bind "Ctrl Space" {
-            LaunchOrFocusPlugin "file:/Users/aliakseizakharau/proj/zwk/target/zellij/zellij-which-key-router.wasm" {
+            LaunchOrFocusPlugin "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
                 floating true
                 borderless true
                 move_to_focused_tab true
@@ -26,7 +26,7 @@ keybinds clear-defaults=true {
 }
 
 plugins {
-    which-key-router location="file:/Users/aliakseizakharau/proj/zwk/target/zellij/zellij-which-key-router.wasm"
+    which-key-router location="file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm"
 
     // Keep status/hint plugins independent of this floating overlay.
 }
@@ -40,7 +40,7 @@ plugins {
 //
 // macOS fallback if the interactive prompt is unreliable: pre-approve the same
 // plugin URL in Zellij's permissions.kdl using the normal permission-cache shape:
-// "file:/Users/aliakseizakharau/proj/zwk/target/zellij/zellij-which-key-router.wasm" {
+// "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
 //     ReadApplicationState
 //     ChangeApplicationState
 // }

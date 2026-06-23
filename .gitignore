@@ -4,3 +4,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+/.codex
+/openspec
+/.env*
+/scripts/terminal-ui-shot
+/scripts/zellij-plugin-shot
+/scenarios
+/tests/test_zellij_plugin_shot.py

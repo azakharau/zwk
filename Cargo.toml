@@ -2,6 +2,12 @@
 name = "zellij-which-key-router"
 version = "0.1.0"
 edition = "2024"
+description = "Passive which-key style hint overlay for Zellij"
+license = "MIT"
+repository = "https://github.com/azakharau/zwk"
+readme = "README.md"
+keywords = ["zellij", "wasm", "terminal", "which-key"]
+categories = ["command-line-utilities"]
 publish = false
 
 
