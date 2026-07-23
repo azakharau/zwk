@@ -1,7 +1,7 @@
 # zwk
 
 `zwk` is a passive which-key style hint overlay for [Zellij](https://zellij.dev/).
-It reads the active Zellij keymap, renders available actions in a small floating pane, then hides itself when Zellij returns to the base mode.
+It reads the active Zellij keymap, renders available actions in a bottom-right floating pane, then closes when Zellij returns to the base mode.
 
 This is not an interactive router. It does not intercept keys or run actions for you.
 
@@ -40,13 +40,9 @@ Use an absolute `file:` URL in your Zellij config. Replace `/absolute/path/to/zw
 keybinds clear-defaults=true {
     locked {
         bind "Ctrl Space" {
-            LaunchOrFocusPlugin "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
-                floating true
-                borderless true
-                move_to_focused_tab true
+            MessagePlugin "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
+                name "zwk:show"
             }
-            SwitchToMode "Normal";
-            FocusPreviousPane;
         }
     }
 
@@ -57,12 +53,25 @@ keybinds clear-defaults=true {
         bind "s" { SwitchToMode "Scroll"; }
         bind "o" { SwitchToMode "Session"; }
     }
+
+    pane {
+        bind "Backspace" { SwitchToMode "Normal"; }
+        bind "Ctrl Space" "Esc" { SwitchToMode "Locked"; }
+    }
 }
 
 plugins {
     which-key-router location="file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm"
 }
+
+load_plugins {
+    "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm"
+}
 ```
+
+The background instance receives `zwk:show`, creates the menu with its final
+size and bottom-right coordinates, then enters Normal mode. Keep the URL
+identical in `MessagePlugin`, `plugins`, and `load_plugins`.
 
 See [`examples/zellij-which-key-router.kdl`](examples/zellij-which-key-router.kdl) for a fuller config fragment.
 
@@ -71,17 +80,17 @@ See [`examples/zellij-which-key-router.kdl`](examples/zellij-which-key-router.kd
 The plugin requests:
 
 - `ReadApplicationState` to inspect the current keymap, panes, tabs, and mode
-- `ChangeApplicationState` to position/hide the floating pane and restore focus to the terminal pane
+- `ChangeApplicationState` to position and close the floating pane and change modes
+- `OpenTerminalsOrPlugins` to create the menu pane
 
 If Zellij's permission prompt is unreliable, pre-approve the same plugin URL in `permissions.kdl` using Zellij's normal permission-cache format.
 
 ## Behavior
 
-- `Ctrl Space` launches or focuses the floating plugin pane.
-- The plugin switches Zellij to `Normal` mode so normal-mode bindings are visible.
-- The terminal pane is focused again immediately.
-- When Zellij returns to its base mode, the plugin hides itself instead of closing, so the next open can reuse the positioned floating pane.
-- The plugin does not use `skip_plugin_cache` in the example config.
+- `Ctrl Space` opens the menu in the bottom-right corner without changing pane focus.
+- `Backspace` returns from a child mode to the root menu; `Esc` or `Ctrl Space` closes it.
+- Hints follow the active Zellij keymap and start with a capital letter.
+- The menu is unselectable, so pane actions still target the terminal beneath it.
 
 ## Tests
 

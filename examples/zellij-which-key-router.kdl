@@ -5,22 +5,19 @@
 keybinds clear-defaults=true {
     locked {
         bind "Ctrl Space" {
-            LaunchOrFocusPlugin "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
-                floating true
-                borderless true
-                move_to_focused_tab true
-            };
-            SwitchToMode "Normal";
-            FocusPreviousPane;
+            MessagePlugin "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
+                name "zwk:show"
+            }
         }
-
-        // Rollback if the overlay fails:
-        // bind "Ctrl Space" {
-        //     SwitchToMode "Normal";
-        // }
     }
 
     normal {
+        bind "Ctrl Space" "Esc" { SwitchToMode "Locked"; }
+        bind "p" { SwitchToMode "Pane"; }
+    }
+
+    pane {
+        bind "Backspace" { SwitchToMode "Normal"; }
         bind "Ctrl Space" "Esc" { SwitchToMode "Locked"; }
     }
 }
@@ -31,16 +28,22 @@ plugins {
     // Keep status/hint plugins independent of this floating overlay.
 }
 
+load_plugins {
+    "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm"
+}
+
 // The overlay is passive: it reads Zellij's current keymap and renders hints.
 // It does not intercept keys and does not run actions itself.
 //
 // Requested permissions:
 // - ReadApplicationState
 // - ChangeApplicationState
+// - OpenTerminalsOrPlugins
 //
 // macOS fallback if the interactive prompt is unreliable: pre-approve the same
 // plugin URL in Zellij's permissions.kdl using the normal permission-cache shape:
 // "file:/absolute/path/to/zwk/target/zellij/zellij-which-key-router.wasm" {
 //     ReadApplicationState
 //     ChangeApplicationState
+//     OpenTerminalsOrPlugins
 // }

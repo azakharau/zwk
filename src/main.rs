@@ -11,79 +11,121 @@ const KEY_TEXT_PADDING: usize = 2;
 const CELL_GAP: usize = 2;
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_KEY: &str = "\x1b[7m";
+const SELF_PLUGIN: &str = "which-key-router";
+const STALE_MENU_SECONDS: u64 = 5;
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 #[derive(Default)]
 struct WhichKeyHints {
+    is_menu: bool,
     mode_info: ModeInfo,
     active_rows: usize,
     active_cols: usize,
     permissions_granted: bool,
-    renderable_mode_seen: bool,
+    menu_pane: Option<PaneId>,
+    show_requested: bool,
+    saw_nonbase: bool,
 }
 
+#[cfg(target_arch = "wasm32")]
 impl ZellijPlugin for WhichKeyHints {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.is_menu = configuration.get("zwk-role").map(String::as_str) == Some("menu");
+        if self.is_menu {
+            let spawned = configuration
+                .get("zwk-spawn")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            if now_epoch_s().saturating_sub(spawned) > STALE_MENU_SECONDS {
+                close_self();
+                return;
+            }
+        }
+
         request_hint_permissions();
         subscribe(&[
             EventType::ModeUpdate,
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
-            EventType::Visible,
         ]);
-        self.restore_terminal_focus();
+        set_selectable(false);
     }
 
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::ModeUpdate(mode_info) => {
                 self.mode_info = mode_info;
-                if should_hide_for_mode(&self.mode_info, self.renderable_mode_seen) {
-                    hide_self();
+                if !self.is_menu {
+                    self.try_open_menu();
                     return false;
                 }
-                if should_render_for_mode(&self.mode_info) {
-                    self.renderable_mode_seen = true;
-                    self.position_self();
+
+                if menu_should_close(&self.mode_info, &mut self.saw_nonbase) {
+                    close_self();
+                    return false;
                 }
+                self.resize_to_keymap();
                 true
             }
             Event::TabUpdate(tabs) => {
                 if let Some(tab) = tabs.iter().find(|tab| tab.active) {
                     self.active_rows = tab.viewport_rows;
                     self.active_cols = tab.viewport_columns;
-                    self.position_self();
                 }
-                true
+                if self.is_menu {
+                    self.resize_to_keymap();
+                } else {
+                    self.try_open_menu();
+                }
+                self.is_menu
             }
-            Event::PaneUpdate(_) => {
-                self.position_self();
-                true
+            Event::PaneUpdate(manifest) => {
+                if !self.is_menu {
+                    if let Some(PaneId::Plugin(menu_id)) = self.menu_pane {
+                        let alive = manifest
+                            .panes
+                            .values()
+                            .flatten()
+                            .any(|pane| pane.is_plugin && pane.id == menu_id);
+                        if !alive {
+                            self.menu_pane = None;
+                        }
+                    }
+                    self.try_open_menu();
+                }
+                false
             }
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 self.permissions_granted = true;
-                self.position_self();
-                self.restore_terminal_focus();
-                true
+                set_selectable(false);
+                if self.is_menu {
+                    switch_to_input_mode(&InputMode::Normal);
+                } else {
+                    self.try_open_menu();
+                }
+                self.is_menu
             }
-            Event::PermissionRequestResult(PermissionStatus::Denied) => true,
-            Event::Visible(true) => {
-                self.position_self();
-                self.restore_terminal_focus();
-                true
-            }
-            Event::Visible(false) => false,
+            Event::PermissionRequestResult(PermissionStatus::Denied) => self.is_menu,
             _ => false,
         }
     }
 
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if self.is_menu || pipe_message.name != "zwk:show" {
+            return false;
+        }
+        self.show_requested = true;
+        self.try_open_menu();
+        false
+    }
+
     fn render(&mut self, rows: usize, cols: usize) {
-        if !should_render_for_mode(&self.mode_info) {
+        if !self.is_menu || self.mode_info.base_mode.is_none() {
             print!("\x1b[2J\x1b[H");
             return;
         }
-
-        let keymap = get_keymap_for_mode(&self.mode_info);
+        let keymap = self.effective_keymap();
         print!(
             "{}",
             render_overlay(&keymap, self.permissions_granted, rows, cols)
@@ -91,27 +133,21 @@ impl ZellijPlugin for WhichKeyHints {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl WhichKeyHints {
-    fn restore_terminal_focus(&mut self) {
-        switch_to_input_mode(&InputMode::Normal);
-        focus_previous_pane();
-        set_selectable(false);
-    }
-
-    fn position_self(&self) {
-        if self.active_cols == 0 || self.active_rows == 0 {
+    fn try_open_menu(&mut self) {
+        if !self.show_requested || self.menu_pane.is_some() || !self.permissions_granted {
             return;
         }
 
-        let Some((width, height)) = self.overlay_dimensions() else {
+        let keymap = self.mode_info.get_keybinds_for_mode(InputMode::Normal);
+        let Some((width, height)) = self.dimensions_for(&keymap) else {
             return;
         };
-
         let x = self
             .active_cols
             .saturating_sub(width.saturating_add(MENU_MARGIN_RIGHT));
         let y = bottom_aligned_y(self.active_rows, height);
-
         let mut coordinates = FloatingPaneCoordinates::default()
             .with_x_fixed(x)
             .with_y_fixed(y)
@@ -119,15 +155,54 @@ impl WhichKeyHints {
             .with_height_fixed(height);
         coordinates.pinned = Some(true);
         coordinates.borderless = Some(true);
-        change_floating_panes_coordinates(vec![(
-            PaneId::Plugin(get_plugin_ids().plugin_id),
-            coordinates,
-        )]);
+
+        let mut config = BTreeMap::new();
+        config.insert("zwk-role".to_owned(), "menu".to_owned());
+        config.insert("zwk-spawn".to_owned(), now_epoch_s().to_string());
+
+        if let Some(pane_id) =
+            open_plugin_pane_floating(SELF_PLUGIN, config, Some(coordinates), BTreeMap::new())
+        {
+            self.menu_pane = Some(pane_id);
+            self.show_requested = false;
+        }
     }
 
-    fn overlay_dimensions(&self) -> Option<(usize, usize)> {
-        let keymap = get_keymap_for_mode(&self.mode_info);
-        let rows = overlay_rows(&keymap, self.permissions_granted);
+    fn resize_to_keymap(&self) {
+        if self.mode_info.base_mode.is_none() {
+            return;
+        }
+        let keymap = self.effective_keymap();
+        let Some((width, height)) = self.dimensions_for(&keymap) else {
+            return;
+        };
+        let x = self
+            .active_cols
+            .saturating_sub(width.saturating_add(MENU_MARGIN_RIGHT));
+        let y = bottom_aligned_y(self.active_rows, height);
+        let mut coordinates = FloatingPaneCoordinates::default()
+            .with_x_fixed(x)
+            .with_y_fixed(y)
+            .with_width_fixed(width)
+            .with_height_fixed(height);
+        coordinates.pinned = Some(true);
+        coordinates.borderless = Some(true);
+        let own_pane = PaneId::Plugin(get_plugin_ids().plugin_id);
+        change_floating_panes_coordinates(vec![(own_pane, coordinates)]);
+    }
+
+    fn effective_keymap(&self) -> Vec<(KeyWithModifier, Vec<Action>)> {
+        if self.saw_nonbase {
+            get_keymap_for_mode(&self.mode_info)
+        } else {
+            self.mode_info.get_keybinds_for_mode(InputMode::Normal)
+        }
+    }
+    fn dimensions_for(&self, keymap: &[(KeyWithModifier, Vec<Action>)]) -> Option<(usize, usize)> {
+        if self.active_cols == 0 || self.active_rows == 0 {
+            return None;
+        }
+        let rows = overlay_rows(keymap, self.permissions_granted);
         let content_height = overlay_content_height(rows.len());
         let content_width = overlay_content_width(&rows);
         floating_pane_dimensions(
@@ -143,6 +218,7 @@ fn request_hint_permissions() {
     request_permission(&[
         PermissionType::ReadApplicationState,
         PermissionType::ChangeApplicationState,
+        PermissionType::OpenTerminalsOrPlugins,
     ]);
 }
 
@@ -176,14 +252,32 @@ fn render_overlay(
     let inner_cols = cols.saturating_sub(FLOATING_FRAME_COLUMNS);
     let row_capacity = inner_rows;
     let mut output = String::from("\x1b[2J\x1b[H");
+    let truncated = rows_to_render.len() > row_capacity;
+    let visible_rows = if truncated {
+        row_capacity.saturating_sub(1)
+    } else {
+        row_capacity
+    };
 
     output.push_str(&border_top(cols));
-    for (key, description) in rows_to_render.into_iter().take(row_capacity) {
+    for (key, description) in rows_to_render.iter().take(visible_rows) {
         output.push('\n');
         output.push('│');
         output.push_str(&render_hint_line(
-            &key,
-            &description,
+            key,
+            description,
+            key_column_width,
+            inner_cols,
+        ));
+        output.push('│');
+    }
+    if truncated && row_capacity > 0 {
+        let hidden_rows = rows_to_render.len().saturating_sub(visible_rows);
+        output.push('\n');
+        output.push('│');
+        output.push_str(&render_hint_line(
+            "…",
+            &format!("More: {hidden_rows}"),
             key_column_width,
             inner_cols,
         ));
@@ -263,11 +357,26 @@ fn bottom_aligned_y(active_rows: usize, pane_height: usize) -> usize {
 }
 
 fn should_render_for_mode(mode_info: &ModeInfo) -> bool {
-    Some(mode_info.mode) != mode_info.base_mode
+    mode_info.base_mode.is_some() && Some(mode_info.mode) != mode_info.base_mode
 }
 
-fn should_hide_for_mode(mode_info: &ModeInfo, renderable_mode_seen: bool) -> bool {
-    renderable_mode_seen && !should_render_for_mode(mode_info)
+fn menu_should_close(mode_info: &ModeInfo, saw_nonbase: &mut bool) -> bool {
+    if mode_info.base_mode.is_none() {
+        return false;
+    }
+    if should_render_for_mode(mode_info) {
+        *saw_nonbase = true;
+        return false;
+    }
+    *saw_nonbase
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn now_epoch_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn overlay_rows(
@@ -276,10 +385,10 @@ fn overlay_rows(
 ) -> Vec<(String, String)> {
     if !permissions_granted {
         return vec![
-            ("!".to_owned(), "waiting for Zellij permissions".to_owned()),
+            ("!".to_owned(), "Waiting for Zellij permissions".to_owned()),
             (
                 "↵".to_owned(),
-                "approve prompt or cache permissions".to_owned(),
+                "Approve prompt or cache permissions".to_owned(),
             ),
         ];
     }
@@ -291,6 +400,9 @@ fn overlay_rows(
         })
         .collect::<Vec<_>>();
     sort_overlay_rows(&mut rows);
+    if rows.is_empty() {
+        rows.push(("?".to_owned(), "No supported keybinds".to_owned()));
+    }
     rows
 }
 
@@ -374,8 +486,16 @@ fn action_sequence_label(actions: &[Action]) -> Option<String> {
     if labels.is_empty() {
         None
     } else {
-        Some(labels.join(" → "))
+        Some(capitalize(&labels.join(" → ")))
     }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(chars).collect()
 }
 
 fn action_label(action: &Action) -> Option<String> {
@@ -463,7 +583,7 @@ fn action_label(action: &Action) -> Option<String> {
             Some(pipe_name.replace(['_', '-'], " "))
         }
         Action::NoOp => None,
-        _ => Some(format!("{action:?}")),
+        _ => None,
     }
 }
 
@@ -495,6 +615,7 @@ fn direction_word(direction: Direction) -> &'static str {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 register_plugin!(WhichKeyHints);
 
 #[cfg(test)]
@@ -515,11 +636,11 @@ mod tests {
                 direction: Direction::Left,
             }])
             .as_deref(),
-            Some("focus left")
+            Some("Focus left")
         );
         assert_eq!(
             action_sequence_label(&[Action::GoToTab { index: 3 }]).as_deref(),
-            Some("go to tab 3")
+            Some("Go to tab 3")
         );
         assert_eq!(
             action_sequence_label(&[Action::NewStackedPane {
@@ -529,7 +650,7 @@ mod tests {
                 tab_id: None,
             }])
             .as_deref(),
-            Some("new stacked pane")
+            Some("New stacked pane")
         );
     }
 
@@ -547,7 +668,7 @@ mod tests {
                 },
             ])
             .as_deref(),
-            Some("split right → Normal mode")
+            Some("Split right → Normal mode")
         );
     }
 
@@ -582,7 +703,7 @@ mod tests {
                 Action::GoToTab { index: 1 },
             ])
             .as_deref(),
-            Some("go to tab 1")
+            Some("Go to tab 1")
         );
         assert_eq!(
             action_sequence_label(&[Action::SwitchToMode {
@@ -624,6 +745,10 @@ mod tests {
         assert_eq!(
             rows.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
             vec!["1", "2", "a", "b"]
+        );
+        assert!(
+            rows.iter()
+                .all(|(_, hint)| hint.chars().next().is_some_and(char::is_uppercase))
         );
     }
 
@@ -667,10 +792,31 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(!should_hide_for_mode(&locked_mode, false));
+        assert!(
+            !should_render_for_mode(&locked_mode),
+            "base mode renders nothing — the pane is hidden outright"
+        );
         assert!(should_render_for_mode(&normal_mode));
         assert!(should_render_for_mode(&pane_mode));
-        assert!(should_hide_for_mode(&locked_mode, true));
+    }
+
+    #[test]
+    fn menu_opens_before_mode_change_and_closes_on_return_to_base() {
+        let locked_mode = ModeInfo {
+            mode: InputMode::Locked,
+            base_mode: Some(InputMode::Locked),
+            ..Default::default()
+        };
+        let normal_mode = ModeInfo {
+            mode: InputMode::Normal,
+            base_mode: Some(InputMode::Locked),
+            ..Default::default()
+        };
+        let mut saw_nonbase = false;
+
+        assert!(!menu_should_close(&locked_mode, &mut saw_nonbase));
+        assert!(!menu_should_close(&normal_mode, &mut saw_nonbase));
+        assert!(menu_should_close(&locked_mode, &mut saw_nonbase));
     }
 
     #[test]
@@ -678,5 +824,23 @@ mod tests {
         let rows = overlay_rows(&[], false);
 
         assert!(rows.iter().any(|(_, label)| label.contains("permissions")));
+        assert!(
+            rows.iter()
+                .all(|(_, hint)| hint.chars().next().is_some_and(char::is_uppercase))
+        );
+    }
+
+    #[test]
+    fn truncated_menu_reports_hidden_rows() {
+        let keymap = vec![
+            (KeyWithModifier::new(BareKey::Char('a')), vec![Action::Quit]),
+            (KeyWithModifier::new(BareKey::Char('b')), vec![Action::Quit]),
+            (KeyWithModifier::new(BareKey::Char('c')), vec![Action::Quit]),
+        ];
+
+        let output = render_overlay(&keymap, true, 4, 30);
+
+        assert!(output.contains("More: 2"));
+        assert!(!output.contains(" b "));
     }
 }
